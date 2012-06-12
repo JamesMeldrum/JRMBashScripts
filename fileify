@@ -1,0 +1,141 @@
+#!/bin/bash 
+#
+# Program: Setup a site on your development machine
+#
+# Author: Ryan Quigley <ryan@exhibit-e.com>
+#
+# Current Version: 1.2.1
+#
+# Revision History:
+# 04.27.10 (1.0.0) - Initial Release
+#
+# Purpose:
+#  reads files table and creates all files
+#
+# Requirements:
+#   gm
+#
+# Installation:
+#   Copy the shell script to a suitable location
+#   Run once to create the config file
+#   Edit ~/conf/setupSite.conf with your db login
+#
+# Usage:
+#
+# Example:
+#
+#  $ fileify SITENAME
+#
+
+########################################################
+##
+##	Configuration
+##
+########################################################
+if [ -f $HOME/conf/setupSite.conf ]; then
+	. $HOME/conf/setupSite.conf
+else
+	if [ ! -d $HOME/conf ]; then
+		mkdir $HOME/conf
+	fi
+	
+	{
+		echo "WEBSITE_DIR=\"$HOME/ee_websites/\""
+		echo "WEBSITE_FILES=\"$HOME/website_files/\""
+		echo
+		echo "SVN_SERVER_ROOT=\"svn+ssh://dev.exhibit-e.com/var/svn/sites/\""
+		echo "SVN_BIN=\"$(type -p svn)\""
+		echo 
+		echo "MYSQL_BIN=\"/opt/local/bin/mysql5\""
+		echo "MYSQL_USER=\"root\""
+		echo "MYSQL_PASS=\"___PASSWORD___\""
+		echo 
+		echo "HTTPD_CONF_FILE=\"/opt/local/apache2/conf/httpd.conf\""
+		echo 
+		echo "APACHECTL_BIN=\"/opt/local/apache2/bin/apachectl\""
+		echo 
+		echo "GM_BIN=\"/opt/local/bin/gm\""
+		echo 
+	} > $HOME/conf/setupSite.conf
+	
+	echo "Please edit $HOME/conf/setupSite.conf and rerun this script"
+	echo 
+	echo "You should also run visudo and add the following"
+	echo "$(whoami) ALL=(root) NOPASSWD: /opt/local/apache2/bin/apachectl"
+	echo 
+
+	exit
+fi
+
+########################################################
+
+if [ $# -lt 1 ]; then
+	echo "Usage: $0 [options] sitename";
+	exit 1
+fi
+
+while [ x"$1" != x ]; do
+	case $1 in
+		*) SITENAME=$1
+		    shift
+		    continue;;
+	esac
+done
+
+
+if [ x"$SITENAME" = x ]; then
+	echo "Usage: $0 sitename";
+	exit 1
+fi	
+
+# Use current directory
+if [ "$SITENAME" = "." ]; then
+	SITENAME=`pwd | perl -pe 's/.*\///'`
+fi
+
+# remove existing Website Files
+if [ -d $WEBSITE_FILES$SITENAME ]; then
+	echo "Removing existing website file upload dir"
+	rm -rf $WEBSITE_FILES$SITENAME
+fi
+
+mkdir $WEBSITE_FILES$SITENAME
+
+
+# Database
+if [[ ! -f $WEBSITE_DIR$SITENAME/common/Configuration.php ]]; then
+    echo "Missing Configuration.php"
+    exit 1;
+fi
+#echo ""
+echo "Setting up DB"
+DB_DATABASE=`perl -nle "print for m/db_database.*= '([^']+)/" $WEBSITE_DIR$SITENAME/common/Configuration.php`
+
+if [ ! -n DB_DATABASE ] || [ ! -n DB_USER ] || [ ! -n DB_PASS ]; then
+	echo "missing db credentials in $WEBSITE_DIR$SITENAME/common/Configuration.php."
+	exit 1;
+fi
+
+files=`$MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -s -s -e "SELECT filename_unique, width, height FROM files" $DB_DATABASE`
+
+# for random colors
+hexa=(0 1 2 3 4 5 6 7 8 9 a b c d e f)
+num_hex=${#hexa[*]}
+
+IFS=$'\n'
+for f in $files; do
+	filename=`echo $f| awk '{print $1}'`
+	width=`echo $f| awk '{print $2}'`
+	height=`echo $f| awk '{print $3}'`
+
+    if [[ $width != [0-9]* || $height != [0-9]* ]]; then
+        width=640
+        height=480
+	fi
+	
+	color="${hexa[$((RANDOM%num_hex))]}${hexa[$((RANDOM%num_hex))]}${hexa[$((RANDOM%num_hex))]}"
+
+    $GM_BIN convert -size ${width}x${height} "xc:#$color" "$WEBSITE_FILES$SITENAME/$filename" &
+done
+
+exit 0

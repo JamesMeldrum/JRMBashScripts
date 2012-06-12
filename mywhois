@@ -1,0 +1,10 @@
+#!/bin/sh
+echo "Fetching domain's whois server..."
+SERVER=`whois $1 | grep -i whois\ server: | awk '{print $3'}`
+if [ $SERVER ]; then
+        echo "Querying whois server "$SERVER"..."
+        whois -h $SERVER $1
+else
+        echo "Querying the default whois server..."
+        whois $1
+fi 

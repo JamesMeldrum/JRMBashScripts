@@ -1,0 +1,201 @@
+#!/bin/bash 
+#
+#	Program: Set up development Enviroment
+#	By: Lee Gillentine <lee@exhibit-e.com>
+#	Details: This script is meant to be run only once and is fairly brittle.
+#
+#   Revision History:
+#
+#	0.1		Initial Verion - 2/10/11
+#   0.2		Refactor - script now checks for (some) files before overiding them, starts the move towards
+#		 	more files in the /conf/ directory of ee_bash
+#	0.3		Fixed chicken and egg problems 
+#
+#
+#
+#
+#
+#
+
+echo "Dev Enviroment Setup Script"
+#since this script relies on $USER, sudo will be bad
+if [ "$USER" == "root" ]; then
+	echo "Do not run as root"
+	exit 1
+fi
+if [ ! -f $HOME/.ssh/id_rsa ]; then
+    echo "Please generate an ssh public key and share it with the dev server"
+    exit 1
+fi
+echo
+#basic software reqs check
+echo "Checking for properly installed software"
+echo
+sudo port installed > installed.out
+
+# 9/3/2012 - JM added pear_MDB2_Driver_mysqli.
+# 24/3/2012 - JM added php5-iconv
+
+for prog in pear-MDB2_Driver_mysqli mysql5-server php5-mysql apache2 subversion GraphicsMagick dnsmasq php5-mbstring php5-iconv
+do
+echo -n "Checking for $prog..."
+grep $prog installed.out > /dev/null
+	if [ "$?" == "1" ]; then
+		echo "NOT FOUND!"
+		echo "please install $prog"
+		exit 1
+	fi
+echo "ok"
+done
+
+echo 
+#ssh
+echo -n "Setting up ssh host for dev..."
+	{
+		echo "host devsvn"
+		echo "	ForwardAgent no"
+		echo "	ForwardX11 no"
+		echo "  User $USER"
+	} >> $HOME/.ssh/config
+echo "ok"
+#paths
+echo -n "Setting up paths and links..."
+
+#user file stuff
+mkdir -p ~/ee_websites
+mkdir -p ~/website_files
+mkdir -p ~/website_tmp/{smarty/{templates_c,cache},twig,files}
+mkdir -p ~/ee_bash
+mkdir $HOME/conf
+#/var/www stuff
+sudo mkdir /var/www
+
+#sudo ln -s /Users/$USER/ee_websites /var/www/ee_websites
+#sudo ln -s /Users/$USER/website_files /var/www/ee_site_files 	
+
+sudo ln -s /var/www/ee_websites /Users/$USER/ee_websites
+sudo ln -s /var/www/ee_site_files /Users/$USER/website_files
+
+sudo mkdir /usr/local
+sudo ln -s /Users/$USER/ee_websites/exhibit-e.com /usr/local/exhibit-e.com
+
+sudo ln -s /opt/local/apache2/logs /var/www/logs
+sudo chown $USER /opt/local/apache2/logs
+echo "ok"
+echo "Creating helper functions..."
+cd ~/ee_bash
+sudo chmod +x setupSite
+echo "ok"
+#pokey crossdomain.xml
+echo -n "Creating crossdomain.xml file..."
+{
+    echo '<?xml version="1.0"?>'
+    echo '<cross-domain-policy>'
+	echo '    <site-control permitted-cross-domain-policies="master-only" />'
+	echo '    <allow-access-from domain="*.dev" />'
+    echo '</cross-domain-policy>'
+} > ~/website_tmp/crossdomain.xml;
+echo "ok"
+#populate up the ee_websites with the admin site and the action script libs
+echo -n "Populating common libraries..."
+
+svn co svn+ssh://devsvn/var/svn/libs/exhibit-e.com/trunk ~/ee_websites/exhibit-e.com
+svn co svn+ssh://devsvn/var/svn/libs/actionscript/trunk ~/ee_websites/as_libs
+
+mkdir ~/ee_websites/admin_assets && cd ~/ee_websites/admin_assets && ln -s ~/ee_websites/exhibit-e.com/eeSiteAdmin/img && ln -s ~/ee_websites/exhibit-e.com/eeSiteAdmin/js_admin && ln -s ~/ee_websites/exhibit-e.com/eeSiteAdmin/style.css
+
+#ennouncements
+ln -s ~/ee_websites/exhibit-e.com/ennouncements_admin/ /Users/$USER/Sites/ennouncements_admin
+
+echo "ok"
+#add a bunch of stuff to the end of the dnsmasq file--everything there is commented out by default
+echo -n "Configuring dnsmasq..."
+if [ -f /opt/local/etc/dnsmasq.conf ]; then
+	sudo chmod 777 /opt/local/etc/dnsmasq.conf
+	sudo mv /opt/local/etc/dnsmasq.conf /opt/local/etc/dnsmasq.conf.bak
+fi
+sudo cp ~/ee_bash/conf/dnsmasq.conf /opt/local/etc/dnsmasq.conf
+sudo ln -s /etc/resolv.conf /opt/local/etc/resolv.conf
+echo "ok"
+echo "Configuring php.ini timezone...";
+TIMEZONELINE=$(grep '^date.timezone = America/New_York' /opt/local/etc/php5/php.ini | wc -l)
+if [ $TIMEZONELINE != 1 ]; then 
+	sudo chmod 777 /opt/local/etc/php5/php.ini
+	{
+		echo 'date.timezone = America/New_York'
+	} >> /opt/local/etc/php5/php.ini
+fi
+echo "ok"
+echo -n "Writing setupSite.conf..."
+if [ -f $HOME/conf/setupSite.conf ]; then
+    . $HOME/conf/setupSite.conf
+else
+    if [ ! -d $HOME/conf ]; then
+        mkdir $HOME/conf
+    fi
+    
+    {
+        echo "WEBSITE_DIR=\"$HOME/ee_websites/\""
+        echo "WEBSITE_FILES=\"$HOME/website_tmp/files/\""
+        echo
+        echo "SVN_SERVER_ROOT=\"svn+ssh://dev.exhibit-e.com/var/svn/sites/\""
+        echo "SVN_BIN=\"$(type -p svn)\""
+        echo 
+        echo "MYSQL_BIN=\"/opt/local/bin/mysql5\""
+        echo "MYSQL_USER=\"root\""
+        echo "MYSQL_PASS=\"___PASSWORD___\""
+        echo 
+        echo "HTTPD_CONF_FILE=\"/opt/local/apache2/conf/httpd.conf\""
+        echo 
+        echo "APACHECTL_BIN=\"/opt/local/apache2/bin/apachectl\""
+        echo 
+        echo "GM_BIN=\"/opt/local/bin/gm\""
+        echo 
+        echo "HTDOCS=\"/var/www\""
+        echo
+        echo "EE_SITES=\"ee_sites\""
+        echo 
+    } > $HOME/conf/setupSite.conf
+fi
+#set correct mysql root password
+$MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -e'use mysql;' &> /dev/null
+if [[ $? == 1 ]]; then
+	echo "Please enter your current mysql root password [cannot be blank, sorry]: "
+	read NEW_PASS
+	sed -i -l "s/\(MYSQL_PASS*= *\).*/\1\"$NEW_PASS\"/" $HOME/conf/setupSite.conf
+	MYSQL_PASS=$NEW_PASS
+fi
+echo "ok"
+echo -n "Creating MVC framework($EE_SITES)..."
+#reload setupSite.conf
+if [ -f $HOME/conf/setupSite.conf ]; then
+	. $HOME/conf/setupSite.conf
+fi
+#create ee_sites login
+$MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -e "CREATE USER 'ee_site_login'@'localhost' IDENTIFIED BY  'mWwrtGJ8Rd3vKnwD'; CREATE DATABASE \`$EE_SITES\` DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci; GRANT USAGE ON * . * TO  'ee_site_login'@'localhost' IDENTIFIED BY  'mWwrtGJ8Rd3vKnwD' WITH MAX_QUERIES_PER_HOUR 0 MAX_CONNECTIONS_PER_HOUR 0 MAX_UPDATES_PER_HOUR 0 MAX_USER_CONNECTIONS 0 ; GRANT SELECT , INSERT , UPDATE , DELETE ON \`$EE_SITES\` . * TO  'ee_site_login'@'localhost';"
+cd ~/ee_bash
+#setupSite will not put in the proper schema in the database since ee_sites is configured differently
+./setupSite $EE_SITES
+
+if [ -f $WEBSITE_DIR$EE_SITES/project_files/schema.sql ]; then
+	file=$WEBSITE_DIR$EE_SITES/project_files/schema.sql
+	$MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS $EE_SITES < $file
+fi
+if [ -f $WEBSITE_DIR$EE_SITES/project_files/schema_test.sql ]; then
+	file=$WEBSITE_DIR$EE_SITES/project_files/schema_test.sql
+	$MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS $EE_SITES < $file
+fi
+
+echo "ok"
+echo -n "Rewriting httpd.conf..."
+DATEVAR=$(date +%s)
+sudo mv /opt/local/apache2/conf/httpd.conf /opt/local/apache2/conf/httpd.conf.$USER.$DATEVAR.bak
+sudo cp $HOME/ee_bash/conf/httpd.conf /opt/local/apache2/conf/
+sudo chmod 777 /opt/local/apache2/conf/httpd.conf
+sudo sed -i -l "s/USERNAME/$USER/g" /opt/local/apache2/conf/httpd.conf
+echo "ok"
+echo "Cleaning up..."
+rm installed.out
+echo "ok"
+echo "Complete.  You'll need to set your dns in network config to 127.0.0.1, 192.168.1.254 and reload dnsmasq... and possibly reboot"
+echo "You'll also need to ensure proper configuration in the admin site to make that work as well"

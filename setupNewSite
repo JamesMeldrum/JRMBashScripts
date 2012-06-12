@@ -1,0 +1,41 @@
+#!/bin/python 
+#
+# Program: Setup new development environemtn on a local host 
+#
+# Author: James Meldrum <james@exhibit-e.com>
+#
+# Current Version: 1.2.1
+#
+# Revision History:
+# 6/6/2012 - Development begins 
+#
+# Purpose:
+#  syncs the trunk (or branch) of dev.exhibit-e.com/svn/site/SITENAME to the your dev 
+#  machine
+#
+# Requirements:
+#   Requires svn client
+#   ssh-key for passwordless login to dev
+#
+# Installation:
+#   Copy the shell script to a suitable location
+#   Run once to create the config file
+#   Edit ~/conf/setupSite.conf with your db login
+#
+# Usage:
+#
+# Example:
+#
+#  $ setupsite SITENAME
+#
+
+########################################################
+##
+##  Configuration
+##
+########################################################
+
+import os
+import sys
+
+echo "Testtt"

@@ -1,0 +1,166 @@
+#!/usr/bin/perl
+#
+# Program: eelibsupdate
+#
+# Author: Ryan Quigley <ryan@exhibit-e.com>
+#
+# Current Version: 1.0.0
+#
+# Revision History:
+# 05.22.09 (1.0.0) - Initial Release
+#
+# Purpose:
+#  syncs the trunk of dev.exhibit-e.com/svn/libs/exhibit-e.com/trunk production
+#
+# Requirements:
+#   Requires svn client
+#	ssh-key for passwordless login to dev
+#
+# Installation:
+#
+# Usage:
+#
+# Example:
+#
+#  $ eelibsupdate
+#
+
+use warnings;
+#use strict; # TODO, off because of yaml traversal
+
+use DBI;
+
+use File::Find;
+use File::Slurp;
+
+no warnings 'File::Find';
+
+use Term::ReadKey;
+
+
+my $SVN_SERVER_ROOT		= "file:///var/svn/libs/exhibit-e.com";
+my $SVN_BIN				= "/usr/bin/svn";
+my $JAVA_BIN			= "/usr/bin/java";
+my $YUI_COMPRESS_JAR	= "/var/siteupdate/lib/yuicompressor-2.4.2/build/yuicompressor-2.4.2.jar";
+
+my $DEV_GROUP			= 'dev_syncable';
+my $SSH_KEY				= '/var/siteupdate/lib/key.pem';
+my $PROD_IP				= '174.37.33.190';
+my $PROD_PORT			= '63295';
+my $PROD_USER			= 'ee_dev_sync';
+my $PROD_SITE_ROOT		= "/usr/local/exhibit-e.com";
+
+umask 0002;
+if (-d "/var/siteupdate/ee_lib/svn") {
+	chdir("/var/siteupdate/ee_lib/svn");
+	#system("$SVN_BIN --quiet up");
+	system("$SVN_BIN --quiet co $SVN_SERVER_ROOT/trunk /var/siteupdate/ee_lib/svn/");
+
+	if (-d "/var/siteupdate/ee_lib/sync") {
+		system("rm -rf /var/siteupdate/ee_lib/sync");
+	}
+
+} else {
+	#system("mkdir -p /var/siteupdate/ee_lib/svn");
+	system("$SVN_BIN --quiet co $SVN_SERVER_ROOT/trunk /var/siteupdate/ee_lib/svn/");
+}
+
+system("rsync -a --exclude \"project_files\" --exclude .svn /var/siteupdate/ee_lib/svn/ /var/siteupdate/ee_lib/sync");
+system("chgrp -R $DEV_GROUP /var/siteupdate/ee_lib/sync");
+
+optimizeFiles();
+tagTrunk();
+syncToProduction();
+
+sub optimizeFiles
+{
+	chdir("/var/siteupdate/ee_lib/sync/site/");
+
+	my $process_dir = "/var/siteupdate/ee_lib/sync";
+
+	find(\&processSmartyTemplates, $process_dir);
+	find(\&processCSS, $process_dir);
+	find(\&processJavascript, $process_dir);
+}
+
+sub processSmartyTemplates
+{
+	return unless -f && /\.tpl$/;
+
+	#print "Compressing Smarty: $_ \n";
+
+	# strip out leading space and remove multiple newlines
+	my $content = `sed -e's/^[ \t]*//' $_ | perl -00pe0`;
+
+	if ($content =~ m/console\.log/) {
+		die "processJavascript: found console.log() which will cause errors. cancelling sync";
+	}
+
+	open(OUTFILE, ">$_") || die ("Cannot open $_");
+	print OUTFILE $content;
+	close OUTFILE;	
+}
+
+sub processCSS
+{
+	return unless -f && /\.css$/;
+
+	# only process uncompressed files
+	return unless `egrep -c "^[[:blank:]].*" $_` != 0;
+
+	print "Compressing CSS: $_ \n";
+
+	# permit stupid ie6 hacks
+	my $content = `sed -e's#/\\*\\*/#/\\*!\\*/#' $_ | $JAVA_BIN -jar $YUI_COMPRESS_JAR --type css | sed -e's#/\\*!\\*/#/\\*\\*/#g'`;
+
+	open(OUTFILE, ">$_") || die ("Cannot open $_");
+	print OUTFILE $content;
+	close OUTFILE;	
+}
+
+sub processJavascript
+{
+	return unless -f && /\.js$/;
+
+	# only process uncompressed files
+	return unless `egrep -c "^[[:blank:]].*" $_` != 0;
+
+	print "Compressing Javascript: $_ \n";
+
+	my $content = `$JAVA_BIN -jar $YUI_COMPRESS_JAR $_`;
+
+	#if ($content =~ m/console\.log/) {
+	#	die "processJavascript: found console.log() which will cause errors. cancelling sync";
+	#}
+
+	open(OUTFILE, ">$_") || die ("Cannot open $_");
+	print OUTFILE $content;
+	close OUTFILE;	
+}
+
+sub tagTrunk
+{
+	my $svn_last_tag = `$SVN_BIN ls $SVN_SERVER_ROOT/tags/ | sort -g | tail -1 | tr -d /`;
+	chomp($svn_last_tag);
+
+	my $svn_current_tag = (sprintf "%.2f\n", $svn_last_tag + 0.01);
+	chomp($svn_current_tag);
+
+	my $date = `date`;
+	system("$SVN_BIN --quiet copy $SVN_SERVER_ROOT/trunk $SVN_SERVER_ROOT/tags/$svn_current_tag -m 'EE libs update: $date'");
+}
+
+sub syncToProduction
+{
+	my $directory_no_exists_on_production = `ssh -i $SSH_KEY -p $PROD_PORT $PROD_USER\@$PROD_IP [ -d $PROD_SITE_ROOT ] || echo 1`;
+	
+	if ($directory_no_exists_on_production eq '1') {
+		print "Not synced to production: '$PROD_SITE_ROOT' does not exist\n";
+		exit 1;
+	}
+
+	system("rsync -a -z --delete -q -e \"ssh -i $SSH_KEY -p $PROD_PORT\" /var/siteupdate/ee_lib/sync/ $PROD_USER\@$PROD_IP:$PROD_SITE_ROOT");
+
+	print "Synced to production\n";
+	exit 0;
+}

@@ -1,0 +1,17 @@
+#!/bin/bash
+
+SSH_COMMAND="ssh svn"
+
+
+if [ $# -lt 1 ]; then
+   echo "Usage: $0 sitename";
+   exit 1
+fi
+
+if [ "$1" = "." ]; then
+	SITENAME=`pwd | perl -pe 's/.*\///'`
+else
+	SITENAME=$1
+fi
+
+ssh devsvn /usr/local/bin/siteupdate $SITENAME;

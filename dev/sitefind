@@ -1,0 +1,11 @@
+#!/bin/bash 
+
+if [ $# -lt 2 ]; then
+	echo "Usage: $0 [options] extionsion sting";
+	exit 1
+fi
+
+filetype=$1
+string=$2
+
+find /var/siteupdate/svn/ -type f -name "*.${filetype}" -print | xargs \grep -nH "${string}" | sed  s#/var/siteupdate/svn/##g | \grep --color=auto "${string}"

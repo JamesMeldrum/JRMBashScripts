@@ -1,0 +1,436 @@
+#!/usr/bin/perl
+#
+# Program: Siteupdate2
+#
+# Author: Ryan Quigley <ryan@exhibit-e.com>
+#
+# Current Version: 1.0.1
+#
+# Revision History:
+# 08.26.08 (1.0.0) - Initial Release
+# 01.08.09 (1.1.0) - Change paths to make more permanent
+# 01.09.09 (1.1.1) - Start to add some checks
+#
+# Purpose:
+#  syncs the trunk (or branch) of dev.exhibit-e.com/svn/site/SITENAME production
+#
+# Requirements:
+#   Requires svn client
+#   ssh-key for passwordless login to dev
+#
+# Installation:
+#
+# Usage:
+#
+# Example:
+#
+#  $ Siteupdate2 SITENAME
+#
+
+use warnings;
+#use strict; # TODO, off because of yaml traversal
+
+use DBI;
+
+use File::Find;
+use File::Slurp;
+
+no warnings 'File::Find';
+
+use Term::ReadKey;
+use Getopt::Long;
+
+my $SVN_SERVER_ROOT     = "file:///var/svn/sites";
+my $SVN_BIN             = "/usr/bin/svn";
+my $JAVA_BIN            = "/usr/bin/java";
+my $YUI_COMPRESS_JAR    = "/var/siteupdate/lib/yuicompressor-2.4.2/build/yuicompressor-2.4.2.jar";
+my $YAML_CACHE_PHP      = '/usr/bin/php -r \'require "/var/siteupdate/lib/yaml/sfYaml.php"; echo var_export(sfYaml::load(file_get_contents("php://stdin", "r")), true);\'';
+
+my $DEV_GROUP           = 'dev_syncable';
+my $SSH_KEY             = '/var/siteupdate/lib/key.pem';
+my $PROD_IP             = '174.37.33.190';
+my $PROD_PORT           = '63295';
+my $PROD_USER           = 'ee_dev_sync';
+my $PROD_SITE_ROOT      = "/opt/www";
+my $PROD_HTTP_CONF_ROOT = "/etc/httpd/ee_conf.d";
+
+my $MYSQL_BIN           = "/usr/bin/mysql";
+my $MYSQL_DB            = "sitemanager";
+my $MYSQL_USER          = "sitemanager";
+my $MYSQL_PASS          = "TwnRPdSncMm99Peb";
+
+my $SITEMANAGER_DIR     = "/var/siteupdate";
+my $SITE_SVN_DIR        = "$SITEMANAGER_DIR/svn";
+my $SITE_PRODUCTION_DIR = "$SITEMANAGER_DIR/on_production";
+my $HTTP_CONFIG_DIR     = "$SITEMANAGER_DIR/http_configs";
+
+my $HTPASSWD_BIN        = "/usr/bin/htpasswd";
+
+my ($site_name) = pop @ARGV;
+
+if (!$site_name) {
+    die "Usage: $0 sitename\n";
+}
+
+# Check for illegal chars
+if ($site_name =~ m/[^-_a-z0-9]/i) {
+    die "Not a valid sitename\n";
+}
+
+umask 0002;
+
+my $force_sync = '';
+GetOptions ('force_sync' => \$force_sync);
+
+my($site_live, $admin_username, $admin_password);
+if ($site_name ne 'ee_sites') {
+    my $dbh = DBI->connect("DBI:mysql:$MYSQL_DB:localhost:3306", $MYSQL_USER, $MYSQL_PASS, { RaiseError => 1}) || die "Can't connect to DB: $DBI::errstr";
+
+    my $sth = $dbh->prepare("SELECT live, username, password FROM sites WHERE identifier = '$site_name';");
+    $sth->execute;
+
+    if ($sth->rows == 0) {
+        die "Sitename '$site_name' not in database\n";
+    }
+    if ($sth->rows > 1) {
+        die "More than one site '$site_name' in database\n";
+    }
+
+    ($site_live, $admin_username, $admin_password) = $sth->fetchrow_array;
+    
+    if ($site_live != 1) {
+        die "Site is not live on production servers\n";
+    }
+}
+
+if (!`$SVN_BIN ls $SVN_SERVER_ROOT/$site_name/ | grep "tags"`) {
+    die "Site does not contain 'tags' folder\n";
+}
+
+my $svn_last_tag = `$SVN_BIN ls $SVN_SERVER_ROOT/$site_name/tags/ | sort -g | tail -1 | tr -d /`;
+chomp($svn_last_tag);
+
+if (!$svn_last_tag) {
+    die "Site doesn't contain tags/1.00 or greater\n";
+}
+
+my @changed_files = `$SVN_BIN diff --summarize $SVN_SERVER_ROOT/$site_name/tags/$svn_last_tag $SVN_SERVER_ROOT/$site_name/trunk`;
+
+my $num_files_changed = 0;
+
+# TODO: implement selective updates
+my ($yaml_changed, $javascript_changed, $css_changed) = 0;
+
+print "Changed files:\n";
+foreach (@changed_files) {
+    if ($_ =~ m/project_files/) {
+        next;
+    }
+    $_ =~ m/^([a-z]+)\s+.*\/tags\/$svn_last_tag\/(.*)/xi;
+    if (!$2) {
+        next;
+    }
+    printf "%2s  %s\n", $1, $2;
+    
+    if ($2 =~ m/\.yaml$/) {
+        $yaml_changed = 1;
+
+    } elsif ($2 =~ m/\.js$/) {
+        $javascript_changed = 1;
+        
+    } elsif ($2 =~ m/\.css$/) {
+        $css_changed = 1;
+    }
+    
+    $num_files_changed++;
+}
+
+if ($num_files_changed == 0 && $force_sync eq '') {
+    print "Nothing is changed. Do you still want to sync [y]: ";
+    $|++;
+    ReadMode 'cbreak';
+    my $key = ReadKey[0];
+    ReadMode 'normal';
+
+    if ($key eq 'n' || $key eq 'N') {
+        print "\n";
+        exit 0;
+    }
+    
+    # we're forcing a sync
+    $yaml_changed = $javascript_changed = $css_changed = 1;
+}
+
+print "\n";
+
+
+umask 0002;
+
+if (-d "$SITE_SVN_DIR/$site_name") {
+    chdir("$SITE_SVN_DIR/$site_name");
+    system("$SVN_BIN --quiet up");
+
+    
+
+} else {
+    system("mkdir -p $SITE_SVN_DIR/$site_name");
+
+    system("$SVN_BIN --quiet co $SVN_SERVER_ROOT/$site_name/trunk $SITE_SVN_DIR/$site_name/");
+
+    # make sure permissions/group are ok
+    system("chgrp -R $DEV_GROUP $SITE_SVN_DIR/$site_name");
+    system("chmod -R g+w $SITE_SVN_DIR/$site_name");
+}
+
+if (-d "$SITE_PRODUCTION_DIR/$site_name") {
+    system("rm -rf $SITE_PRODUCTION_DIR/$site_name");
+}
+
+system("rsync -a --exclude \"project_files\" --exclude \"httpd-dev.conf\" --exclude .svn $SITE_SVN_DIR/$site_name/ $SITE_PRODUCTION_DIR/$site_name");
+
+customSyncPreflight();
+commonChecks();
+optimizeFiles();
+if ($site_name ne 'ee_sites') {
+    createAdminPassword();
+}
+reformatHttpConfigs();
+
+# make sure permissions are ok
+system("chgrp -R $DEV_GROUP $SITE_PRODUCTION_DIR/$site_name");
+
+tagTrunk();
+syncToProduction();
+
+sub customSyncPreflight
+{
+    if (-f "$SITE_SVN_DIR/$site_name/project_files/siteupdate_preflight.sh") {
+        print "Running Custom Preflight\n";
+        chdir("$SITE_PRODUCTION_DIR/$site_name/");
+        system("sh $SITE_SVN_DIR/$site_name/project_files/siteupdate_preflight.sh");
+    }
+}
+
+sub commonChecks
+{
+    chdir("$SITE_PRODUCTION_DIR/$site_name/");
+
+    if (!-f "site/favicon.ico") {
+        print "WARNING - missing favicon.ico\n";
+    }
+}
+
+sub createAdminPassword
+{
+    if ($admin_username && $admin_password) {
+        system("$HTPASSWD_BIN -bc $SITE_PRODUCTION_DIR/$site_name/httpauth.users $admin_username $admin_password");
+
+        #temporary hack
+        #if ($site_name eq 'lissongallery') {
+        #   system("$HTPASSWD_BIN -b $SITE_PRODUCTION_DIR/$site_name/httpauth.users salim\@salimvirani.com Keith6ch");
+        #}
+    }
+}
+
+sub reformatHttpConfigs
+{
+    my $filename;
+    if (-f "$SITE_PRODUCTION_DIR/$site_name/httpd-site.conf") {
+        $filename = "$site_name-site.conf";
+
+        processHttpConfig("$SITE_PRODUCTION_DIR/$site_name/httpd-site.conf", "$HTTP_CONFIG_DIR/$filename");
+    }
+    if (-f "$SITE_PRODUCTION_DIR/$site_name/httpd-admin.conf") {
+        $filename = "$site_name-admin.conf";
+
+        processHttpConfig("$SITE_PRODUCTION_DIR/$site_name/httpd-admin.conf", "$HTTP_CONFIG_DIR/$filename");
+    }
+}
+
+sub processHttpConfig
+{
+    my ($old_file, $new_file) = @_;
+    
+    my $text = read_file($old_file);
+
+    # Apache 1.3 depreciated
+    $text =~ s/^\<\/?IfDefine.*//mg;
+
+    # new vhost configs
+    $text =~ s/^\<VirtualHost \*:443.*/<VirtualHost ee_this_host_ssl:443>/mg;
+    $text =~ s/^\<VirtualHost \*.*/<VirtualHost ee_this_host:80>/mg;
+
+    #client logging
+    $text =~ s/CustomLog \$(\S+).*/CustomLog \/var\/www\/w3logs\/$1\/access_log "combined"/mg;
+
+    #admin logging
+    $text =~ s/(CustomLog|ErrorLog) \/var\/www\/([^\/]+)\/logs/$1 \/var\/www\/admin_logs\/$2/mg;
+
+    #admin access
+    $text =~ s/AuthUserFile \/var/AuthUserFile \/opt/mg;
+
+
+    #ssl
+    $ssl_def = <<END
+# SSL Defs
+SSLEngine on
+SSLProtocol all -SSLv2
+SSLCipherSuite ALL:!ADH:!EXPORT:!SSLv2:RC4+RSA:+HIGH:+MEDIUM:+LOW
+SSLCertificateFile "/etc/httpd/ssl/*.exhibit-e.com.crt"
+SSLCertificateKeyFile "/etc/httpd/ssl/*.exhibit-e.com.key"
+SSLCertificateChainFile "/etc/httpd/ssl/godaddy_bundle.crt"
+
+<FilesMatch "\.(php)\$">
+    SSLOptions +StdEnvVars
+</FilesMatch>
+
+SetEnvIf User-Agent ".*MSIE.*" \\
+         nokeepalive ssl-unclean-shutdown \\
+         downgrade-1.0 force-response-1.0
+# END SSL Defs
+END
+;
+
+    $text =~ s/^# SSL Defs.*# END SSL Defs/$ssl_def/ms;
+
+    #print $text;
+    if (-f "$new_file") {
+        system("rm -f $new_file");
+    }
+    write_file($new_file, $text);
+
+    system("chgrp $DEV_GROUP $new_file");  
+}
+
+sub optimizeFiles
+{
+    chdir("$SITE_PRODUCTION_DIR/$site_name/");
+
+    processCrossdomainXml();
+
+    my $process_dir = "$SITE_PRODUCTION_DIR/$site_name/";
+
+    find(\&processSmartyTemplates, $process_dir);
+    find(\&processCSS, $process_dir);
+    find(\&processJavascript, $process_dir);
+    find(\&processPHP, $process_dir);
+
+    if (-d "$process_dir/common/Configuration") {
+        our $yaml_cache_file = "<?php\n\$_cached_config = array();";
+        find(\&processYAML, "$process_dir/common/Configuration");
+        $yaml_cache_file .= "\n?>";
+
+        open(OUTFILE, ">$process_dir/common/Configuration/_cached.php") || die ("Cannot open $_");
+        print OUTFILE $yaml_cache_file;
+        close OUTFILE;
+
+        system("rm -f $process_dir/common/Configuration/*.yaml");
+    }
+}
+
+sub processSmartyTemplates
+{
+    return unless -f && /\.tpl$/;
+
+    # strip out leading space and remove multiple newlines
+    my $content = `sed -e's/^[ \t]*//' $_ | perl -00pe0`;
+
+    if ($content =~ m/console\.log/) {
+        die "processJavascript: found console.log() in $_ which will cause errors. cancelling sync";
+    }
+
+    open(OUTFILE, ">$_") || die ("Cannot open $_");
+    print OUTFILE $content;
+    close OUTFILE;  
+}
+
+sub processCSS
+{
+    return unless -f && /\.css$/;
+
+    # permit stupid ie6 hacks
+    my $content = `sed -e's#/\\*\\*/#/\\*!\\*/#' $_ | $JAVA_BIN -jar $YUI_COMPRESS_JAR --type css | sed -e's#/\\*!\\*/#/\\*\\*/#g'`;
+
+    open(OUTFILE, ">$_") || die ("Cannot open $_");
+    print OUTFILE $content;
+    close OUTFILE;  
+}
+
+sub processJavascript
+{
+    return unless -f && /\.js$/;
+
+    my $content = `$JAVA_BIN -jar $YUI_COMPRESS_JAR $_`;
+
+    if ($content =~ m/console\.log/) {
+        die "processJavascript: found console.log() which will cause errors. cancelling sync";
+    }
+
+    open(OUTFILE, ">$_") || die ("Cannot open $_");
+    print OUTFILE $content;
+    close OUTFILE;  
+}
+
+sub processPHP
+{
+    return unless -f && /\.php$/;
+
+    my $content = `cat $_`;
+
+    if ($content =~ m/dbDebug/) {
+        die "processPHP: found dbDebug() which will expose information. cancelling sync";
+    }
+
+}
+
+sub processYAML
+{
+    return unless -f && /\.yaml$/;
+    
+    my $name = $_;
+    $name =~ s/\.yaml//;
+
+    $yaml_cache_file .= "\n\$_cached_config['$name'] = ";
+    $yaml_cache_file .= `$YAML_CACHE_PHP < $_`;
+    $yaml_cache_file .= ";";
+}
+
+sub processCrossdomainXml
+{   
+    if (! -r "crossdomain.xml") {
+        return;
+    }
+
+    `cat crossdomain.xml | grep -v '"*.dev"' > crossdomain.xml2`;
+    `rm crossdomain.xml`;
+    `mv crossdomain.xml2 crossdomain.xml`;
+}
+
+sub tagTrunk
+{
+    my $svn_current_tag = (sprintf "%.2f\n", $svn_last_tag + 0.01);
+    chomp($svn_current_tag);
+
+    my $date = `date`;
+    system("$SVN_BIN --non-interactive --quiet copy $SVN_SERVER_ROOT/$site_name/trunk $SVN_SERVER_ROOT/$site_name/tags/$svn_current_tag -m 'SITEUPDATE: $date'");
+}
+
+sub syncToProduction
+{
+    my $directory_no_exists_on_production = `ssh -i $SSH_KEY -p $PROD_PORT $PROD_USER\@$PROD_IP [ -d $PROD_SITE_ROOT/$site_name ] || echo 1`;
+    
+    if ($directory_no_exists_on_production eq '1') {
+        print "Not synced to production: '$PROD_SITE_ROOT/$site_name' does not exist\n";
+        exit 1;
+    }
+
+    #system("rsync -a -z --delete --progress --stats -e \"ssh -p $PROD_PORT\" /var/siteupdate/sites/$site_name/sync/ $PROD_USER\@$PROD_IP:$PROD_SITE_ROOT/$site_name");
+    system("rsync -a -z --delete -q -e \"ssh -i $SSH_KEY -p $PROD_PORT\" $SITE_PRODUCTION_DIR/$site_name/ $PROD_USER\@$PROD_IP:$PROD_SITE_ROOT/$site_name");
+
+    #config
+    system("ssh -i $SSH_KEY -p $PROD_PORT $PROD_USER\@$PROD_IP rm -f $PROD_HTTP_CONF_ROOT/$site_name-*");
+    system("rsync -a -z --delete -q -e \"ssh -i $SSH_KEY -p $PROD_PORT\" $HTTP_CONFIG_DIR/$site_name-* $PROD_USER\@$PROD_IP:$PROD_HTTP_CONF_ROOT/");
+
+    print "Synced to production\n";
+    exit 0;
+}

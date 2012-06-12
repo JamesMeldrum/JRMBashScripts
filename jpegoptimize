@@ -1,0 +1,75 @@
+#!/usr/bin/perl
+#
+# Program: jpegoptimize
+#
+# Author: Ryan Quigley <ryan@exhibit-e.com>
+#
+# Current Version: 1.0.
+#
+# Revision History:
+# 09.30.08 (1.0.0) - Initial Release
+#
+# Purpose:
+#  optimizes all jpegs of a site
+#
+# Requirements:
+#   jpegtran
+#
+# Installation:
+#
+# Usage:
+#
+# Example:
+#
+#  $ jpegoptimize .
+#
+
+use warnings;
+#use strict; # TODO, off because of yaml traversal
+
+use File::Find;
+no warnings 'File::Find';
+
+#use Term::ReadKey;
+
+my ($dir) = @ARGV;
+
+if (!$dir) {
+	die "Usage: $0 dir\n";
+}
+
+find(\&processJPEG, $dir);
+
+sub processJPEG
+{
+	return unless -f && /\.jpg$/;
+	my $pre_size = (stat($_))[7];
+
+	`jpegtran -copy none -optimize -perfect $_ > _$_`;
+
+	my $post_size = (stat("_$_"))[7];
+
+	`rm $_`;
+	`mv _$_ $_`;
+
+	my $pre_size_d = sprintf "%d.1K", $pre_size/1024;
+	my $post_size_d = sprintf "%d.1K", $post_size/1024;
+
+	my $change = '';
+
+	if ($pre_size - $post_size > 0) {
+		$change = sprintf "%d", ($pre_size - $post_size)/$pre_size*100;
+		if ($change == 0) {
+			$change = '';
+		}
+	}
+
+	printf "%-35s %-10s %-10s %s", $_, $pre_size_d, $post_size_d, $change;
+	if ($change) {
+		print "%\n";
+	} else {
+		print "\n";
+	}
+
+}
+

@@ -1,0 +1,18 @@
+# Date: 5/4/2012
+# Author: JM
+# Desc: Searches your etc hosts file for a repo name and checks if it's been added
+
+# Get variables
+# Grep through /etc/hosts for variable
+# Return true or false
+
+## Debug script
+echo "$o ran at" $(date) >> check.log
+
+REPO_NAME="$1"
+EXISTS=$( grep -i "$REPO_NAME" < /etc/hosts ) 2>> err_check.log
+if [[ -n ${EXISTS} ]] ; then
+	echo "$REPO_NAME is in /etc/hosts" >> check.log
+else
+	echo "Please add $REPO_NAME to /etc/hosts" >> check.log
+fi

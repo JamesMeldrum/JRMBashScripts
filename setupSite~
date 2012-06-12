@@ -1,0 +1,338 @@
+#!/bin/bash 
+#
+# Program: Setup a site on your development machine
+#
+# Author: Ryan Quigley <ryan@exhibit-e.com>
+#
+# Current Version: 1.2.1
+#
+# Revision History:
+# 11.27.07 (1.0.0) - Initial Release
+# 12.09.07 (1.0.1) - Add branch support
+# 03.17.08 (1.0.2) - Properly escape db names for mysql queries
+# 03.25.08 (1.0.3) - client_url was accidently moved to top
+# 06.30.08 (1.1.0) - add options for skipping db load, listing branches
+# 08.12.08 (1.1.1) - refactoring and check to make sure Configuration.php is there
+# 09.10.09 (1.2.0) - add file generation
+# 10.17.09 (1.2.1) - if not moving old folder, make sure you update to latest source
+#
+# Purpose:
+#  syncs the trunk (or branch) of dev.exhibit-e.com/svn/site/SITENAME to the your dev 
+#  machine
+#
+# Requirements:
+#   Requires svn client
+#   ssh-key for passwordless login to dev
+#
+# Installation:
+#   Copy the shell script to a suitable location
+#   Run once to create the config file
+#   Edit ~/conf/setupSite.conf with your db login
+#
+# Usage:
+#
+# Example:
+#
+#  $ setupsite SITENAME
+#
+
+########################################################
+##
+##  Configuration
+##
+########################################################
+if [ -f $HOME/conf/setupSite.conf ]; then
+    . $HOME/conf/setupSite.conf
+else
+    if [ ! -d $HOME/conf ]; then
+        mkdir $HOME/conf
+    fi
+    
+    {
+        echo "WEBSITE_DIR=\"$HOME/ee_websites/\""
+        echo "WEBSITE_FILES=\"$HOME/website_tmp/files/\""
+        echo
+        echo "SVN_SERVER_ROOT=\"svn+ssh://dev.exhibit-e.com/var/svn/sites/\""
+        echo "SVN_BIN=\"$(type -p svn)\""
+        echo 
+        echo "MYSQL_BIN=\"/opt/local/bin/mysql5\""
+        echo "MYSQL_USER=\"root\""
+        echo "MYSQL_PASS=\"root\""
+        echo 
+        echo "HTTPD_CONF_FILE=\"/opt/local/apache2/conf/httpd.conf\""
+        echo 
+        echo "APACHECTL_BIN=\"/opt/local/apache2/bin/apachectl\""
+        echo 
+        echo "GM_BIN=\"/opt/local/bin/gm\""
+        echo 
+        echo "HTDOCS=\"/var/www\""
+        echo
+        echo "EE_SITES=\"ee_sites\""
+        echo        
+    } > $HOME/conf/setupSite.conf
+
+    echo "Please edit $HOME/conf/setupSite.conf and rerun this script"
+    echo 
+    echo "You should also run visudo and add the following"
+    echo "$(whoami) ALL=(root) NOPASSWD: /opt/local/apache2/bin/apachectl"
+    echo 
+
+    exit
+fi
+
+########################################################
+
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 [options] sitename";
+    exit 1
+fi
+
+if [ "$1" == "help" ]; then
+    echo "Usage: $0 [options] sitename";
+    echo "  -b=branch        checkout branch instead of trunk";
+    echo "  --list-branches  list all branches";
+    echo "  --no-db           don't clean out db or files";
+    echo "  --db-only         only clean db and files";
+    echo "  -m                open in Textmate";
+
+    exit
+fi
+
+
+while [ x"$1" != x ]; do
+    case $1 in
+        --no-db) skip_db=true
+            shift
+            continue;;
+
+        --db-only) db_only=true
+            shift
+            continue;;
+
+        -b=*) branch=`echo $1 | sed 's/-b=//'`
+            shift
+            continue;;
+
+        --list-branches) list_branches=true
+            shift
+            continue;;
+
+        -m) open_in_textmate=1
+            shift
+            continue;;
+
+        *) SITENAME=$1
+            shift
+            continue;;
+    esac
+done
+
+if [ x"$SITENAME" = x ]; then
+    echo "Usage: $0 [options] sitename";
+    exit 1
+fi  
+
+# Use current directory
+if [ "$SITENAME" = "." ]; then
+    SITENAME=`pwd | perl -pe 's/.*\///'`
+fi
+
+# Use a branch instead?
+if [ $branch ]; then
+    PROJECT_DIR="branches/$branch"
+else
+    PROJECT_DIR="trunk"
+fi
+
+SVN_SITE_ROOT=$SVN_SERVER_ROOT$SITENAME
+
+if [ $list_branches ]; then
+    svn ls $SVN_SITE_ROOT/branches
+    exit
+fi
+
+
+# Test if the site exists in the repository.
+if [[ ! -n $db_only ]]; then
+    svn info $SVN_SITE_ROOT/$PROJECT_DIR 2>&1 | grep 'Not a valid URL' > /dev/null
+    if [ $? -eq 0 ]; then
+        echo "Not a valid site: $SVN_SITE_ROOT/$PROJECT_DIR doesn't exist"
+        echo "exiting"
+        exit 1
+    fi
+fi
+
+# Website Dir. if the old one exists (and isn't up to sync), move it to an unused location
+# skip if we're doing db_only
+if [[ ! -n $db_only ]]; then
+    create_dir=1
+
+    if [ -d $WEBSITE_DIR$SITENAME ]; then
+
+        # Make sure that the svn url isn't different. if so, preserve it
+        diff_svn_url=0
+        if [[ "$SVN_SITE_ROOT/$PROJECT_DIR" != "$(svn info $WEBSITE_DIR$SITENAME | grep "^URL: " | sed 's/^URL: //')" ]]; then
+            diff_svn_url=1
+        fi
+
+        # are there uncommitted changes to the dir? if so, preserve it
+        has_mods=$(svn status -q $WEBSITE_DIR$SITENAME)
+
+        if [[ ! -z "$has_mods" || $diff_svn_url = 1 ]]; then
+            bname=$(svn info $WEBSITE_DIR$SITENAME | grep "^URL: " | sed 's/.*\///')
+
+            if [[ $bname = "trunk" ]]; then
+                tmp_dirname=$WEBSITE_DIR$SITENAME
+            else
+                tmp_dirname=$WEBSITE_DIR$SITENAME.$bname
+            fi
+
+            i=0
+            until [ ! -d "$tmp_dirname.$i" ]; do
+                let i++
+            done
+            mv $WEBSITE_DIR$SITENAME $tmp_dirname.$i
+            echo "Website root directory already exists, moving old folder to $tmp_dirname.$i"
+        else
+            create_dir=0
+
+            cd $WEBSITE_DIR$SITENAME
+            svn up -q
+        fi
+    fi
+
+    if [ $create_dir -eq 1 ]; then
+        echo "Creating website root directory and checking out site"
+        mkdir $WEBSITE_DIR$SITENAME
+        cd $WEBSITE_DIR$SITENAME
+        svn co -q $SVN_SITE_ROOT/$PROJECT_DIR ./
+    fi
+fi
+
+if [ $open_in_textmate ]; then
+    mate $WEBSITE_DIR$SITENAME &
+fi
+
+# Website Files - ignore if skipping db
+if [[ ! -n $skip_db ]]; then
+    if [ -d $WEBSITE_FILES$SITENAME ]; then
+        echo "Removing existing website file upload dir"
+        rm -rf $WEBSITE_FILES$SITENAME
+    fi
+    #echo "Creating website file upload dir"
+    mkdir $WEBSITE_FILES$SITENAME
+fi
+
+# Database
+if [[ ! -n $skip_db && -f $WEBSITE_DIR$SITENAME/common/Configuration.php ]]; then
+    #echo ""
+    echo "Setting up DB"
+    DB_DATABASE=`perl -nle "print for m/db_database.*= '([^']+)/" $WEBSITE_DIR$SITENAME/common/Configuration.php`
+    DB_USER=`perl -nle "print for m/db_user.*= '([^']+)/" $WEBSITE_DIR$SITENAME/common/Configuration.php`
+    DB_PASS=`perl -nle "print for m/db_password.*= '([^']+)/" $WEBSITE_DIR$SITENAME/common/Configuration.php`
+
+    if [ ! -n DB_DATABASE ] || [ ! -n DB_USER ] || [ ! -n DB_PASS ]; then
+        echo "missing db credentials in $WEBSITE_DIR$SITENAME/common/Configuration.php. Skipping Step"
+    else
+        # DB work
+        #echo "Creating database and adding schema"
+        $MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -e "DROP DATABASE IF EXISTS \`$DB_DATABASE\`; CREATE DATABASE \`$DB_DATABASE\` DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;"
+        if [ -f $WEBSITE_DIR$SITENAME/project_files/schema.sql ]; then
+            $MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS $DB_DATABASE < $WEBSITE_DIR$SITENAME/project_files/schema.sql
+        else
+            echo "Database not populated. $WEBSITE_DIR$SITENAME/project_files/schema.sql doesn't exist"
+        fi
+
+        if [ "$SITENAME" != "gtemplate" ]; then
+            is_in_ee_sites=`$MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -e "SELECT 1 FROM ee_sites.sites WHERE ee_site_name = '$SITENAME'"`
+            if [ "$is_in_ee_sites" == '' ]; then
+                $MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -e "INSERT into ee_sites.sites SET ee_site_name = '$SITENAME', is_active = 1"
+            fi
+        fi
+
+        if [ -f $WEBSITE_DIR$SITENAME/project_files/schema_must_run.sql ]; then
+            $MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS $DB_DATABASE < $WEBSITE_DIR$SITENAME/project_files/schema_must_run.sql
+        fi
+
+        if [ -f $WEBSITE_DIR$SITENAME/project_files/schema_test.sql ]; then
+            file=$WEBSITE_DIR$SITENAME/project_files/schema_test.sql
+
+            # insert the mysql data
+            $MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS $DB_DATABASE < $file
+
+            # Are there file queries
+            has_files=`\\grep "^INSERT INTO .files" $file`
+
+            if [[ ! -z "$has_files" ]]; then
+                # for random colors
+                hexa=(0 1 2 3 4 5 6 7 8 9 a b c d e f)
+                num_hex=${#hexa[*]}
+
+                # get all the files to create
+                
+                files=`$MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -s -s -e "SELECT filename_unique, width, height FROM files" $DB_DATABASE`
+
+                OLDIFS=$IFS
+                IFS=$'\n'
+
+                for f in $files; do
+                    filename=`echo $f| awk '{print $1}'`
+                    width=`echo $f| awk '{print $2}'`
+                    height=`echo $f| awk '{print $3}'`
+
+                    if [[ $width != [0-9]* || $height != [0-9]* ]]; then
+                        width=640
+                        height=480
+                    fi
+                    
+                    color="${hexa[$((RANDOM%num_hex))]}${hexa[$((RANDOM%num_hex))]}${hexa[$((RANDOM%num_hex))]}"
+
+                    $GM_BIN convert -size ${width}x${height} "xc:#$color" "$WEBSITE_FILES$SITENAME/$filename" &
+                done
+                
+                IFS=$OLDIFS
+            fi
+        fi
+    
+        if [ "$DB_USER" != "root" ]; then
+            # redirect to null because mysql will error if user doesn't exist
+            $MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -e "DROP USER '$DB_USER'@'localhost';" > /dev/null 2>&1
+
+            $MYSQL_BIN -u $MYSQL_USER -p$MYSQL_PASS -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY  '$DB_PASS';
+            GRANT USAGE ON * . * TO  '$DB_USER'@'localhost' IDENTIFIED BY  '$DB_PASS' WITH MAX_QUERIES_PER_HOUR 0 MAX_CONNECTIONS_PER_HOUR 0 MAX_UPDATES_PER_HOUR 0 MAX_USER_CONNECTIONS 0 ;
+            GRANT SELECT , INSERT , UPDATE , DELETE ON \`$DB_DATABASE\` . * TO  '$DB_USER'@'localhost';
+            ";
+        else
+            echo "do not use 'root' as user. skipping"
+        fi
+    fi
+fi
+
+# httpd config
+grep "^Include /var/www/ee_websites/$SITENAME/httpd-dev.conf" $HTTPD_CONF_FILE > /dev/null
+if [ "$?" == "1" ]; then
+    echo "Include /var/www/ee_websites/$SITENAME/httpd-dev.conf" >> $HTTPD_CONF_FILE
+
+    if [ $APACHECTL_BIN ]; then
+        sudo $APACHECTL_BIN restart
+    else
+        echo ""
+        echo "Adding site to httpd.conf (remember to restart apache)"       
+    fi
+fi
+
+# hosts file
+#CLIENT_URL=`perl -nle "print for m/client_url.*= 'http:\/\/([\w]+\.dev)/" $WEBSITE_DIR$SITENAME/common/Configuration.php`
+#HAS_CONF=`perl -nle "print for m/$CLIENT_URL/" /etc/hosts`
+#if [ "$HAS_CONF" != "1" ]; then
+#   echo ""
+#   echo "Add the following to /etc/hosts:"
+#   echo "127.0.0.1       $CLIENT_URL admin.$CLIENT_URL"
+#   #sudo echo "127.0.0.1       $CLIENT_URL admin.$CLIENT_URL" >> /etc/hosts
+#fi
+
+echo ""
+echo "All done!"
+echo ""
+
+exit 0;

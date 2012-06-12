@@ -1,0 +1,64 @@
+#!/usr/bin/perl
+
+use warnings;
+
+my ($site_url) = @ARGV;
+
+if (!$site_url) {
+	die "Usage: $0 url\n";
+}
+
+
+doQuery("a");
+doQuery("a", "www");
+print "\n";
+
+doQuery("ns");
+print "\n";
+
+doQuery("a", "admin");
+doQuery("a", "ftp");
+doQuery("a", "panel");
+print "\n";
+
+doQuery("mx");
+doQuery("txt");
+doQuery("a", "mail");
+doQuery("a", "webmail");
+doQuery("a", "exchange");
+doQuery("a", "imap");
+doQuery("a", "pop");
+doQuery("a", "smtp");
+
+
+
+sub doQuery
+{
+	my $query_type = $_[0];
+	my $subdomain =  $_[1];
+	
+	my $record;
+	
+	$record = "dig +short $query_type ";
+	if ($subdomain) {
+		$record .= "$subdomain.$site_url";
+	} else {
+		$record .= "$site_url";
+	}
+	my $record_x = `$record`;
+	chomp($record_x);
+	
+	# space out secondary lines
+	$record_x =~ s/\n/\n                             /g;
+	
+	if ($subdomain) {
+		my $tmp = "$subdomain.$site_url";
+		printf "%26s : %s\n", $tmp, $record_x;
+
+	} elsif ($query_type ne 'a') {
+		printf "%26s : %s\n", $query_type, $record_x;
+
+	} else {
+		printf "%26s : %s\n", $site_url, $record_x;
+	}
+}
