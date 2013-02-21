@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Path:  /usr/local/bin
+
+echo "Username of desired repo?"
+read username
+
+echo "Reponame of desired repo?"
+read reponame
+
+git clone git://github.com/$username/$reponame.git
